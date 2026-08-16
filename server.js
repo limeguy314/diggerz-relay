@@ -1,12 +1,8 @@
-/**
- * Diggerz online relay — names + positions for remote players
- * Deploy on Render: node server.js
- */
 const http = require("http");
 const { WebSocketServer } = require("ws");
 
 const PORT = process.env.PORT || 3010;
-const clients = new Map(); // id -> { ws, name, x, y, skin, outfit, lastSeen }
+const clients = new Map();
 
 function broadcast(exceptId, obj) {
   const raw = JSON.stringify(obj);
@@ -27,8 +23,7 @@ function roster(exceptId) {
       name: c.name || "Player",
       x: c.x,
       y: c.y,
-      skin: c.skin || 0,
-      outfit: c.outfit || null
+      skin: c.skin || 0
     });
   }
   return list;
@@ -49,71 +44,81 @@ wss.on("connection", (ws) => {
   clients.set(id, {
     ws,
     name: "Player",
-    x: 20,
+    x: 24,
     y: 10,
     skin: 0,
-    outfit: null,
-    lastSeen: Date.now()
+    lastSeen: Date.now(),
+    announced: false
   });
-
   console.log("[join]", id, "online=", clients.size);
 
-  // Tell this client their id + everyone already here
   try {
     ws.send(JSON.stringify({ type: "welcome", id, peers: roster(id) }));
   } catch (e) {}
 
-  // Tell others someone joined (name may update on hello)
-  broadcast(id, {
-    type: "join",
-    id,
-    name: "Player",
-    x: 20,
-    y: 10,
-    skin: 0
-  });
+  // Do NOT broadcast join until hello (avoids "Player" spam)
+  // If no hello in 2s, announce as Player anyway
+  setTimeout(() => {
+    const c = clients.get(id);
+    if (!c || c.announced) return;
+    c.announced = true;
+    broadcast(id, {
+      type: "join",
+      id,
+      name: c.name,
+      x: c.x,
+      y: c.y,
+      skin: c.skin
+    });
+  }, 2000);
 
   ws.on("message", (data) => {
     let msg;
-    try {
-      msg = JSON.parse(String(data));
-    } catch (e) {
-      return;
-    }
+    try { msg = JSON.parse(String(data)); } catch (e) { return; }
     const c = clients.get(id);
     if (!c) return;
     c.lastSeen = Date.now();
 
     if (msg.type === "hello") {
-      if (msg.name && String(msg.name).trim()) {
-        c.name = String(msg.name).trim().slice(0, 24);
-      }
+      const newName = (msg.name && String(msg.name).trim()) ? String(msg.name).trim().slice(0, 24) : c.name;
+      const nameChanged = newName !== c.name;
+      c.name = newName;
       if (typeof msg.skin === "number") c.skin = msg.skin;
-      if (msg.outfit) c.outfit = msg.outfit;
       console.log("[hello]", id, c.name);
-      // Re-announce with real name
-      broadcast(id, {
-        type: "join",
-        id,
-        name: c.name,
-        x: c.x,
-        y: c.y,
-        skin: c.skin,
-        outfit: c.outfit
-      });
-      // Also send name update
-      broadcast(id, {
-        type: "name",
-        id,
-        name: c.name,
-        skin: c.skin
-      });
+
+      if (!c.announced) {
+        c.announced = true;
+        broadcast(id, {
+          type: "join",
+          id,
+          name: c.name,
+          x: c.x,
+          y: c.y,
+          skin: c.skin
+        });
+      } else if (nameChanged) {
+        broadcast(id, {
+          type: "name",
+          id,
+          name: c.name,
+          skin: c.skin
+        });
+        broadcast(id, {
+          type: "join",
+          id,
+          name: c.name,
+          x: c.x,
+          y: c.y,
+          skin: c.skin
+        });
+      }
       return;
     }
 
     if (msg.type === "pos") {
       if (typeof msg.x === "number") c.x = msg.x;
       if (typeof msg.y === "number") c.y = msg.y;
+      if (msg.name && String(msg.name).trim()) c.name = String(msg.name).trim().slice(0, 24);
       broadcast(id, {
         type: "pos",
         id,
@@ -131,17 +136,6 @@ wss.on("connection", (ws) => {
         name: c.name,
         text: String(msg.text).slice(0, 120)
       });
-      return;
-    }
-
-    if (msg.type === "outfit") {
-      c.outfit = msg.outfit || null;
-      broadcast(id, {
-        type: "outfit",
-        id,
-        name: c.name,
-        outfit: c.outfit
-      });
     }
   });
 
@@ -150,21 +144,8 @@ wss.on("connection", (ws) => {
     broadcast(id, { type: "leave", id });
     console.log("[leave]", id, "online=", clients.size);
   });
-
   ws.on("error", () => {});
 });
-
-// Drop stale clients
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, c] of clients) {
-    if (now - c.lastSeen > 120000) {
-      try { c.ws.close(); } catch (e) {}
-      clients.delete(id);
-      broadcast(id, { type: "leave", id });
-    }
-  }
-}, 30000);
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log("[diggerz-relay] listening on", PORT);
